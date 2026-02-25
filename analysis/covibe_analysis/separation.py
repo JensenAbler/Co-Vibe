@@ -3,13 +3,16 @@ Demucs source separation wrapper.
 
 Splits a mixed audio track into isolated stems:
 vocals, drums, bass, other.
-
-Phase 1 will add the actual Demucs integration.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+import demucs.api
+
+logger = logging.getLogger(__name__)
 
 
 def separate_stems(audio_path: Path, output_dir: Path) -> dict[str, str]:
@@ -24,7 +27,19 @@ def separate_stems(audio_path: Path, output_dir: Path) -> dict[str, str]:
         Dict mapping stem names to file paths:
         {"vocals": "...", "drums": "...", "bass": "...", "other": "..."}
     """
-    # TODO (Phase 1): Integrate Demucs
-    # from demucs.pretrained import get_model
-    # from demucs.apply import apply_model
-    raise NotImplementedError("Demucs integration pending — Phase 1")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Loading Demucs htdemucs model")
+    separator = demucs.api.Separator(model="htdemucs")
+
+    logger.info("Separating stems from %s", audio_path)
+    _, separated = separator.separate_audio_file(str(audio_path))
+
+    stem_paths: dict[str, str] = {}
+    for stem_name, audio_tensor in separated.items():
+        stem_file = output_dir / f"{stem_name}.wav"
+        demucs.api.save_audio(audio_tensor, str(stem_file), samplerate=separator.samplerate)
+        stem_paths[stem_name] = str(stem_file)
+        logger.info("Wrote stem %s to %s", stem_name, stem_file)
+
+    return stem_paths

@@ -104,9 +104,7 @@ export interface SongOutline {
 export type AnalysisJobStatus =
   | "queued"
   | "separating"
-  | "detecting_key"
-  | "tracking_beats"
-  | "segmenting"
+  | "analyzing"
   | "assembling"
   | "complete"
   | "failed";

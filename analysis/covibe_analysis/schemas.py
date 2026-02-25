@@ -130,7 +130,7 @@ class SongOutline(BaseModel):
 
 class AnalysisStatus(BaseModel):
     job_id: str
-    status: Literal["queued", "separating", "detecting_key", "tracking_beats", "segmenting", "assembling", "complete", "failed"]
+    status: Literal["queued", "separating", "analyzing", "assembling", "complete", "failed"]
     progress: float = Field(0.0, ge=0.0, le=1.0, description="0-1 progress estimate")
     error: str | None = None
 
