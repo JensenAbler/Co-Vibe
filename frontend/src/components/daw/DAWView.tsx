@@ -5,7 +5,38 @@
  * a playhead, and agent prompts. This is a structural placeholder that
  * will be built out in Phase 4.
  */
+
+import { useEffect } from "react";
+import { useLocation } from "wouter";
+import { useSessionStore } from "@/store/session-store";
+import type { SectionLabel } from "@/types/song-outline";
+
+const SECTION_COLORS: Record<SectionLabel, { bg: string; text: string }> = {
+  intro: { bg: "bg-blue-500/20", text: "text-blue-400" },
+  verse: { bg: "bg-green-500/20", text: "text-green-400" },
+  chorus: { bg: "bg-orange-500/20", text: "text-orange-400" },
+  bridge: { bg: "bg-purple-500/20", text: "text-purple-400" },
+  instrumental: { bg: "bg-cyan-500/20", text: "text-cyan-400" },
+  solo: { bg: "bg-yellow-500/20", text: "text-yellow-400" },
+  outro: { bg: "bg-rose-500/20", text: "text-rose-400" },
+  break: { bg: "bg-gray-500/20", text: "text-gray-400" },
+};
+
+const TRACK_LABELS = ["Melody", "Chords", "Bass", "Drums", "Pad"] as const;
+
 export function DAWView() {
+  const [, navigate] = useLocation();
+  const outline = useSessionStore((s) => s.outline);
+
+  // Redirect to upload if no outline is loaded
+  useEffect(() => {
+    if (!outline) navigate("/");
+  }, [outline, navigate]);
+
+  if (!outline) return null;
+
+  const { key, tempo, time_signature } = outline;
+
   return (
     <div className="flex min-h-screen flex-col">
       {/* Transport bar */}
@@ -22,9 +53,9 @@ export function DAWView() {
           </div>
         </div>
         <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          <span>120 BPM</span>
-          <span>Am</span>
-          <span>4/4</span>
+          <span>{Math.round(tempo.bpm)} BPM</span>
+          <span>{key.tonic} {key.mode}</span>
+          <span>{time_signature.numerator}/{time_signature.denominator}</span>
         </div>
       </header>
 
@@ -32,20 +63,22 @@ export function DAWView() {
       <main className="flex flex-1 flex-col overflow-hidden">
         {/* Section markers */}
         <div className="flex h-8 items-center gap-px border-b bg-card/50 px-2">
-          <span className="rounded-sm bg-blue-500/20 px-2 py-0.5 text-[10px] font-medium text-blue-400">
-            Intro
-          </span>
-          <span className="rounded-sm bg-green-500/20 px-2 py-0.5 text-[10px] font-medium text-green-400">
-            Verse
-          </span>
-          <span className="rounded-sm bg-orange-500/20 px-2 py-0.5 text-[10px] font-medium text-orange-400">
-            Chorus
-          </span>
+          {outline.sections.map((section) => {
+            const colors = SECTION_COLORS[section.label] ?? SECTION_COLORS.intro;
+            return (
+              <span
+                key={section.id}
+                className={`rounded-sm px-2 py-0.5 text-[10px] font-medium ${colors.bg} ${colors.text}`}
+              >
+                {section.label.charAt(0).toUpperCase() + section.label.slice(1)}
+              </span>
+            );
+          })}
         </div>
 
         {/* Track rows */}
         <div className="flex-1 overflow-y-auto">
-          {["Melody", "Chords", "Bass", "Drums", "Pad"].map((track) => (
+          {TRACK_LABELS.map((track) => (
             <div
               key={track}
               className="flex h-16 items-center border-b border-border/50"

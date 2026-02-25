@@ -1,47 +1,69 @@
 import { useState, useCallback } from "react";
 import { useLocation } from "wouter";
 import { cn } from "@/components/ui/utils";
+import { uploadForAnalysis, pollUntilComplete } from "@/api/analysis-client";
+import { useSessionStore } from "@/store/session-store";
+import type { AnalysisStatus } from "@/types/song-outline";
 
-/**
- * Upload view — the landing page where users drop an audio file
- * to start the analysis pipeline.
- *
- * Phase 5 will wire this to the actual analysis API.
- */
+const STATUS_LABELS: Record<string, string> = {
+  queued: "Queued...",
+  separating: "Separating stems...",
+  analyzing: "Analyzing key, beats & structure...",
+  assembling: "Assembling song outline...",
+};
+
 export function UploadView() {
   const [, navigate] = useLocation();
   const [isDragOver, setIsDragOver] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setIsAnalyzing(true);
+      setError(null);
+      setAnalysisStatus(null);
+
+      try {
+        const { job_id } = await uploadForAnalysis(file);
+
+        const result = await pollUntilComplete(job_id, (status) => {
+          setAnalysisStatus(status);
+        });
+
+        useSessionStore.getState().setOutline(result.outline);
+        navigate("/perform");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Analysis failed");
+        setIsAnalyzing(false);
+      }
+    },
+    [navigate]
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
       const file = e.dataTransfer.files[0];
-      if (file) {
-        handleFile(file);
-      }
+      if (file) handleFile(file);
     },
-    []
+    [handleFile]
   );
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) {
-        handleFile(file);
-      }
+      if (file) handleFile(file);
     },
-    []
+    [handleFile]
   );
 
-  const handleFile = (_file: File) => {
-    setIsAnalyzing(true);
-    // TODO (Phase 5): Upload to /api/analyze and poll for status
-    // For now, simulate analysis and navigate to DAW view
-    setTimeout(() => {
-      navigate("/perform");
-    }, 1500);
+  const handleRetry = () => {
+    setError(null);
+    setIsAnalyzing(false);
+    setAnalysisStatus(null);
   };
 
   return (
@@ -53,10 +75,32 @@ export function UploadView() {
         </p>
       </div>
 
-      {isAnalyzing ? (
+      {error ? (
         <div className="flex flex-col items-center gap-4">
+          <p className="text-sm text-red-400">{error}</p>
+          <button
+            onClick={handleRetry}
+            className="rounded bg-secondary px-4 py-2 text-sm font-medium hover:bg-secondary/80"
+          >
+            Try again
+          </button>
+        </div>
+      ) : isAnalyzing ? (
+        <div className="flex w-full max-w-sm flex-col items-center gap-4">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          <p className="text-sm text-muted-foreground">Analyzing...</p>
+          <p className="text-sm text-muted-foreground">
+            {analysisStatus
+              ? STATUS_LABELS[analysisStatus.status] ?? "Processing..."
+              : "Uploading..."}
+          </p>
+          {analysisStatus && (
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-500"
+                style={{ width: `${(analysisStatus.progress ?? 0) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
       ) : (
         <label

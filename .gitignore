@@ -17,6 +17,15 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
+# Cog
+.cog/
+
+# Vercel
+.vercel/
+
+# Environment overrides
+.env*.local
+
 # IDE
 .vscode/
 .idea/

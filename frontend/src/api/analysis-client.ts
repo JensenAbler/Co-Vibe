@@ -1,17 +1,31 @@
 /**
- * HTTP client for the Python analysis API.
+ * HTTP client for the analysis API.
  *
- * Handles file upload, status polling, and result fetching.
+ * Supports two modes controlled by VITE_API_MODE:
+ * - "replicate" (production): presigned upload to Replicate Files API,
+ *   then POST { file_url } to Vercel serverless function
+ * - default (local dev): multipart POST directly to FastAPI
  */
 
 import type { AnalysisStatus, AnalysisResult } from "@/types/song-outline";
 
 const API_BASE = "/api";
+const IS_REPLICATE = import.meta.env.VITE_API_MODE === "replicate";
 
 /**
  * Upload an audio file to start analysis.
+ *
+ * In local mode: multipart POST to FastAPI.
+ * In production: presigned PUT to Replicate Files, then POST file_url.
  */
 export async function uploadForAnalysis(file: File): Promise<AnalysisStatus> {
+  if (IS_REPLICATE) {
+    return uploadViaReplicate(file);
+  }
+  return uploadDirect(file);
+}
+
+async function uploadDirect(file: File): Promise<AnalysisStatus> {
   const formData = new FormData();
   formData.append("file", file);
 
@@ -25,6 +39,43 @@ export async function uploadForAnalysis(file: File): Promise<AnalysisStatus> {
   }
 
   return res.json();
+}
+
+async function uploadViaReplicate(file: File): Promise<AnalysisStatus> {
+  // 1. Get a presigned upload URL from our Vercel function
+  const urlRes = await fetch(
+    `${API_BASE}/upload-url?filename=${encodeURIComponent(file.name)}&content_type=${encodeURIComponent(file.type || "audio/wav")}`
+  );
+
+  if (!urlRes.ok) {
+    throw new Error(`Failed to get upload URL: ${urlRes.status}`);
+  }
+
+  const { upload_url, file_url } = await urlRes.json();
+
+  // 2. PUT the file bytes directly to Replicate storage
+  const putRes = await fetch(upload_url, {
+    method: "PUT",
+    headers: { "Content-Type": file.type || "audio/wav" },
+    body: file,
+  });
+
+  if (!putRes.ok) {
+    throw new Error(`File upload failed: ${putRes.status}`);
+  }
+
+  // 3. Tell our API to start analysis with the uploaded file URL
+  const analyzeRes = await fetch(`${API_BASE}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_url }),
+  });
+
+  if (!analyzeRes.ok) {
+    throw new Error(`Analysis start failed: ${analyzeRes.status}`);
+  }
+
+  return analyzeRes.json();
 }
 
 /**
