@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JensenAbler/Co-Vibe/shared/song-outline-schema.json",
+  "title": "SongOutline",
+  "description": "The core data contract between the Python analysis pipeline and the TypeScript performance frontend.",
+  "type": "object",
+  "required": ["id", "source_track", "key", "tempo", "sections", "slots"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for this outline"
+    },
+    "source_track": {
+      "type": "object",
+      "required": ["filename", "duration"],
+      "properties": {
+        "filename": { "type": "string" },
+        "duration": { "type": "number", "description": "Duration in seconds" },
+        "sample_rate": { "type": "integer", "default": 44100 }
+      }
+    },
+    "key": {
+      "type": "object",
+      "required": ["tonic", "mode", "confidence"],
+      "properties": {
+        "tonic": { "type": "string", "description": "Note name, e.g. 'A', 'C#', 'Bb'" },
+        "mode": { "type": "string", "enum": ["major", "minor"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "tempo": {
+      "type": "object",
+      "required": ["bpm", "confidence"],
+      "properties": {
+        "bpm": { "type": "number" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "time_signature": {
+      "type": "object",
+      "properties": {
+        "numerator": { "type": "integer", "default": 4 },
+        "denominator": { "type": "integer", "default": 4 }
+      }
+    },
+    "beats": {
+      "type": "array",
+      "items": { "type": "number" },
+      "description": "Beat timestamps in seconds"
+    },
+    "downbeats": {
+      "type": "array",
+      "items": { "type": "number" },
+      "description": "Downbeat timestamps in seconds"
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "start_time", "end_time", "start_beat", "end_beat"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": {
+            "type": "string",
+            "enum": ["intro", "verse", "chorus", "bridge", "instrumental", "solo", "outro", "break"]
+          },
+          "start_time": { "type": "number" },
+          "end_time": { "type": "number" },
+          "start_beat": { "type": "integer" },
+          "end_beat": { "type": "integer" },
+          "chords": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["chord", "start_time", "end_time", "start_beat", "end_beat"],
+              "properties": {
+                "chord": { "type": "string" },
+                "start_time": { "type": "number" },
+                "end_time": { "type": "number" },
+                "start_beat": { "type": "integer" },
+                "end_beat": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "track_name", "section_ids", "status", "priority"],
+        "properties": {
+          "id": { "type": "string" },
+          "track_name": {
+            "type": "string",
+            "enum": ["melody", "bass", "chords", "drums", "pad"]
+          },
+          "section_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "status": {
+            "type": "string",
+            "enum": ["empty", "user-filled", "agent-filled"]
+          },
+          "priority": { "type": "integer" }
+        }
+      }
+    },
+    "stems": {
+      "type": "object",
+      "properties": {
+        "vocals": { "type": "string" },
+        "drums": { "type": "string" },
+        "bass": { "type": "string" },
+        "other": { "type": "string" }
+      }
+    }
+  }
+}
