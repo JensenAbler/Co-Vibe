@@ -14,6 +14,7 @@ import { useAgentStore } from "@/store/agent-store";
 import { initAudioEngine, getAudioEngine } from "@/audio/audio-engine";
 import { getMidiInput } from "@/audio/midi-input";
 import { getSlotRecorder } from "@/audio/slot-recorder";
+import { useAutoSave } from "@/hooks/use-auto-save";
 import { TransportBar } from "./TransportBar";
 import { TimelineRuler } from "./TimelineRuler";
 import { TrackRow } from "./TrackRow";
@@ -93,6 +94,9 @@ export function DAWView() {
   const currentChord = useAgentStore((s) => s.current_chord);
 
   const initDoneRef = useRef(false);
+
+  // Auto-save on recording changes
+  useAutoSave();
 
   // Redirect to upload if no outline is loaded
   useEffect(() => {

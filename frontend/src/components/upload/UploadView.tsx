@@ -1,8 +1,11 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useLocation } from "wouter";
+import { FolderOpen, Music } from "lucide-react";
 import { cn } from "@/components/ui/utils";
 import { uploadForAnalysis, pollUntilComplete } from "@/api/analysis-client";
 import { useSessionStore } from "@/store/session-store";
+import { listSessions, type DBSessionMeta } from "@/lib/db";
+import { SessionBrowser } from "@/components/sessions/SessionBrowser";
 import type { AnalysisStatus } from "@/types/song-outline";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -18,6 +21,13 @@ export function UploadView() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sessionBrowserOpen, setSessionBrowserOpen] = useState(false);
+  const [recentSessions, setRecentSessions] = useState<DBSessionMeta[]>([]);
+
+  // Load recent sessions on mount
+  useEffect(() => {
+    listSessions().then((list) => setRecentSessions(list.slice(0, 3)));
+  }, []);
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -32,7 +42,10 @@ export function UploadView() {
           setAnalysisStatus(status);
         });
 
-        useSessionStore.getState().setOutline(result.outline);
+        // Create a new session from the analysis result
+        useSessionStore.getState().createSession(result.outline);
+        // Auto-save immediately
+        await useSessionStore.getState().save();
         navigate("/perform");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Analysis failed");
@@ -64,6 +77,15 @@ export function UploadView() {
     setError(null);
     setIsAnalyzing(false);
     setAnalysisStatus(null);
+  };
+
+  const handleOpenSession = async (id: string) => {
+    await useSessionStore.getState().loadFromDB(id);
+    navigate("/perform");
+  };
+
+  const handleSessionLoaded = () => {
+    navigate("/perform");
   };
 
   return (
@@ -103,47 +125,95 @@ export function UploadView() {
           )}
         </div>
       ) : (
-        <label
-          className={cn(
-            "flex h-64 w-full max-w-lg cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors",
-            isDragOver
-              ? "border-primary bg-primary/10"
-              : "border-muted-foreground/30 hover:border-muted-foreground/50"
-          )}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragOver(true);
-          }}
-          onDragLeave={() => setIsDragOver(false)}
-          onDrop={handleDrop}
-        >
-          <svg
-            className="mb-3 h-10 w-10 text-muted-foreground"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={1.5}
+        <>
+          <label
+            className={cn(
+              "flex h-64 w-full max-w-lg cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors",
+              isDragOver
+                ? "border-primary bg-primary/10"
+                : "border-muted-foreground/30 hover:border-muted-foreground/50"
+            )}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={handleDrop}
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M9 8.25H7.5a2.25 2.25 0 0 0-2.25 2.25v9a2.25 2.25 0 0 0 2.25 2.25h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25H15m0-3-3-3m0 0-3 3m3-3V15"
+            <svg
+              className="mb-3 h-10 w-10 text-muted-foreground"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M9 8.25H7.5a2.25 2.25 0 0 0-2.25 2.25v9a2.25 2.25 0 0 0 2.25 2.25h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25H15m0-3-3-3m0 0-3 3m3-3V15"
+              />
+            </svg>
+            <p className="text-sm font-medium text-muted-foreground">
+              Drop an audio file here, or click to browse
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground/60">
+              WAV, MP3, FLAC, OGG
+            </p>
+            <input
+              type="file"
+              accept="audio/*"
+              className="hidden"
+              onChange={handleFileInput}
             />
-          </svg>
-          <p className="text-sm font-medium text-muted-foreground">
-            Drop an audio file here, or click to browse
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground/60">
-            WAV, MP3, FLAC, OGG
-          </p>
-          <input
-            type="file"
-            accept="audio/*"
-            className="hidden"
-            onChange={handleFileInput}
-          />
-        </label>
+          </label>
+
+          {/* Recent sessions + browse all */}
+          <div className="flex w-full max-w-lg flex-col gap-3">
+            {recentSessions.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Recent sessions
+                </p>
+                {recentSessions.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => handleOpenSession(s.id)}
+                    className="flex w-full items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-left transition-colors hover:bg-secondary/50"
+                  >
+                    <Music className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-medium">{s.name}</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        {s.sourceFilename}
+                      </p>
+                    </div>
+                    <span className="text-[10px] text-muted-foreground/60">
+                      {new Date(s.updated_at).toLocaleDateString()}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={() => setSessionBrowserOpen(true)}
+              className="flex items-center justify-center gap-2 rounded-md border border-dashed border-muted-foreground/30 py-2 text-xs text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {recentSessions.length > 0
+                ? "Browse all sessions..."
+                : "Load a saved session"}
+            </button>
+          </div>
+        </>
       )}
+
+      {/* Session browser modal */}
+      <SessionBrowser
+        open={sessionBrowserOpen}
+        onOpenChange={setSessionBrowserOpen}
+        onSessionLoaded={handleSessionLoaded}
+      />
     </div>
   );
 }
