@@ -20,14 +20,18 @@ interface TransportState {
   soloedTracks: Set<string>;
   /** Whether stems have been loaded */
   stemsReady: boolean;
+  /** Per-track volume levels (0-1) */
+  trackVolumes: Record<string, number>;
 
   // Actions
   play: () => void;
   stop: () => void;
+  seek: (time: number) => void;
   setPosition: (position: number) => void;
   setCurrentBeat: (beat: number) => void;
   toggleMute: (trackName: string) => void;
   toggleSolo: (trackName: string) => void;
+  setVolume: (trackName: string, volume: number) => void;
   setStemsReady: (ready: boolean) => void;
 }
 
@@ -38,6 +42,7 @@ export const useTransportStore = create<TransportState>((set, get) => ({
   mutedTracks: new Set<string>(),
   soloedTracks: new Set<string>(),
   stemsReady: false,
+  trackVolumes: {},
 
   play: () => {
     const engine = getAudioEngine();
@@ -82,6 +87,18 @@ export const useTransportStore = create<TransportState>((set, get) => ({
       engine.setSolo(trackName, true);
     }
     set({ soloedTracks: next });
+  },
+
+  seek: (time) => {
+    const engine = getAudioEngine();
+    engine.seek(time);
+  },
+
+  setVolume: (trackName, volume) => {
+    const { trackVolumes } = get();
+    const engine = getAudioEngine();
+    engine.setVolume(trackName, volume);
+    set({ trackVolumes: { ...trackVolumes, [trackName]: volume } });
   },
 
   setStemsReady: (ready) => set({ stemsReady: ready }),

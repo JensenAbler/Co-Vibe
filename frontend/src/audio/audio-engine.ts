@@ -42,9 +42,10 @@ export class AudioEngine {
   // Outline reference
   private outline: SongOutline | null = null;
 
-  // Mute/Solo state (mirrored from transport-store for audio-thread access)
+  // Mute/Solo/Volume state (mirrored from transport-store for audio-thread access)
   private mutedTracks = new Set<string>();
   private soloedTracks = new Set<string>();
+  private trackVolumes = new Map<string, number>();
 
   // Duration
   private duration = 0;
@@ -194,6 +195,42 @@ export class AudioEngine {
   }
 
   /**
+   * Seek to a position in seconds. If playing, restarts from new position.
+   */
+  seek(time: number): void {
+    const clampedTime = Math.max(0, Math.min(time, this.duration));
+
+    if (this.playing) {
+      // Stop current sources without resetting offset
+      for (const source of this.stemSources.values()) {
+        try {
+          source.onended = null;
+          source.stop();
+        } catch {
+          // May already be stopped
+        }
+      }
+      this.stemSources.clear();
+
+      for (const synth of this.slotSynths) {
+        synth.stopAll();
+      }
+      this.slotSynths = [];
+
+      this.stopClock();
+
+      // Restart from new position
+      this.playing = false;
+      this.offset = clampedTime;
+      this.play();
+    } else {
+      this.offset = clampedTime;
+    }
+
+    useTransportStore.getState().setPosition(clampedTime);
+  }
+
+  /**
    * Get the current playback position in seconds.
    */
   getCurrentTime(): number {
@@ -256,6 +293,14 @@ export class AudioEngine {
     this.updateAllGains();
   }
 
+  setVolume(trackName: string, volume: number): void {
+    this.trackVolumes.set(trackName, Math.max(0, Math.min(1, volume)));
+    const gain = this.stemGains.get(trackName);
+    if (gain) {
+      this.applyGainForTrack(trackName, gain);
+    }
+  }
+
   private updateAllGains(): void {
     for (const [name, gain] of this.stemGains) {
       this.applyGainForTrack(name, gain);
@@ -266,8 +311,9 @@ export class AudioEngine {
     const hasSolos = this.soloedTracks.size > 0;
     const isMuted = this.mutedTracks.has(trackName);
     const isSoloed = this.soloedTracks.has(trackName);
+    const volume = this.trackVolumes.get(trackName) ?? 1;
 
-    let targetGain = 1;
+    let targetGain = volume;
     if (isMuted) {
       targetGain = 0;
     } else if (hasSolos && !isSoloed) {
