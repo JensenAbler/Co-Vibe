@@ -12,6 +12,7 @@ dist/
 # Node
 node_modules/
 frontend/dist/
+server/dist/
 
 # OS
 .DS_Store
