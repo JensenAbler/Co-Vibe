@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
@@ -33,12 +34,16 @@ from covibe_analysis.pipeline import run_pipeline  # noqa: E402
 # Stem order convention — result.ts relies on this exact order
 STEM_ORDER = ["vocals", "drums", "bass", "other"]
 
+# Use /app/output instead of /tmp to avoid Cog's temp directory cleanup.
+OUTPUT_ROOT = Path("/app/output")
+
 
 class Predictor(BasePredictor):
     def setup(self):
         """Pre-load Demucs model for warm predictions."""
         import demucs.api
 
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         self._separator = demucs.api.Separator(model="htdemucs")
 
     def predict(
@@ -52,23 +57,41 @@ class Predictor(BasePredictor):
         ordered array of CDN URLs in prediction.output.
         """
         audio_path = Path(str(audio))
+        job_id = uuid4().hex[:12]
 
-        # Use mkdtemp so the directory persists after predict() returns;
-        # Cog reads the output files *after* each yield.
-        upload_dir = Path(tempfile.mkdtemp())
+        # Use a persistent directory under /app/output to avoid Cog's
+        # /tmp cleanup that can remove tempfile.mkdtemp() directories.
+        upload_dir = OUTPUT_ROOT / job_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[predict] Job {job_id}: upload_dir = {upload_dir}")
+
+        # Copy the original audio into upload_dir so that downstream
+        # modules (structure analysis) can find it alongside the stems.
+        local_audio = upload_dir / audio_path.name
+        shutil.copy2(str(audio_path), str(local_audio))
+        print(f"[predict] Copied input audio to {local_audio}")
 
         job = {
-            "id": uuid4().hex[:12],
-            "file_path": str(audio_path),
+            "id": job_id,
+            "file_path": str(local_audio),
             "upload_dir": str(upload_dir),
             "status": "queued",
             "progress": 0.0,
         }
 
-        asyncio.run(run_pipeline(job, separator=self._separator))
+        try:
+            asyncio.run(run_pipeline(job, separator=self._separator))
+        except Exception as e:
+            print(f"[predict] asyncio.run raised: {e}")
+            raise RuntimeError(f"Pipeline raised: {e}") from e
+
+        print(f"[predict] Pipeline status={job['status']}, progress={job['progress']}")
 
         if job["status"] == "failed":
             raise RuntimeError(f"Pipeline failed: {job.get('error', 'unknown')}")
+
+        if "outline" not in job or job["outline"] is None:
+            raise RuntimeError("Pipeline completed but no outline was generated")
 
         outline = job["outline"]
 
@@ -79,8 +102,14 @@ class Predictor(BasePredictor):
         outline.stems.bass = ""
         outline.stems.other = ""
 
+        # Verify upload_dir still exists before writing
+        if not upload_dir.exists():
+            print(f"[predict] WARNING: upload_dir vanished, recreating {upload_dir}")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
         output_path = upload_dir / "outline.json"
         output_path.write_text(outline.model_dump_json(indent=2))
+        print(f"[predict] Wrote outline.json ({output_path.stat().st_size} bytes)")
 
         # Yield outline first
         yield CogPath(str(output_path))
@@ -89,7 +118,14 @@ class Predictor(BasePredictor):
         for stem_name in STEM_ORDER:
             stem_path = upload_dir / f"{stem_name}.wav"
             if stem_path.exists():
+                print(f"[predict] Yielding {stem_name}.wav ({stem_path.stat().st_size} bytes)")
                 yield CogPath(str(stem_path))
             else:
-                # Should not happen, but skip gracefully
-                print(f"Warning: stem {stem_name}.wav not found in {upload_dir}")
+                print(f"[predict] WARNING: stem {stem_name}.wav not found in {upload_dir}")
+
+        # Clean up the output directory after all files have been yielded
+        # (Cog has already uploaded them at this point)
+        try:
+            shutil.rmtree(upload_dir)
+        except Exception:
+            pass

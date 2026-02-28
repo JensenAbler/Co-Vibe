@@ -8,7 +8,7 @@ server/dist
 .venv
 venv
 __pycache__
-.cog
+# .cog is needed by Cog builds — do NOT ignore it
 .vercel
 *.wav
 analysis
