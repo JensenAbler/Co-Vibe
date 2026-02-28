@@ -1,0 +1,14 @@
+node_modules
+frontend/node_modules
+server/node_modules
+frontend/dist
+server/dist
+.claude
+.git
+.venv
+venv
+__pycache__
+.cog
+.vercel
+*.wav
+analysis

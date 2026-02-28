@@ -1,0 +1,20 @@
+{
+  "name": "co-vibe-api",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0",
+  "scripts": {
+    "server": "cd server && npx tsx index.ts",
+    "server:dev": "cd server && npx tsx watch index.ts",
+    "dev:all": "npx concurrently \"npm run dev --prefix frontend\" \"npm run server\""
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@vercel/blob": "^2.3.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^4.0.0",
+    "concurrently": "^9.0.0",
+    "typescript": "^5.6.0"
+  }
+}
