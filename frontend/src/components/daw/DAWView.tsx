@@ -2,7 +2,8 @@
  * Main DAW (Digital Audio Workstation) view — the performance interface.
  *
  * Composes TransportBar, TimelineRuler, TrackRow, and agent prompt footer.
- * Manages audio engine initialization, MIDI wiring, and keyboard shortcuts.
+ * Manages audio engine initialization, MIDI wiring, Conductor lifecycle,
+ * and keyboard shortcuts.
  */
 
 import { useEffect, useCallback, useRef } from "react";
@@ -11,10 +12,19 @@ import { cn } from "@/components/ui/utils";
 import { useSessionStore } from "@/store/session-store";
 import { useTransportStore } from "@/store/transport-store";
 import { useAgentStore } from "@/store/agent-store";
+import { useClaudeStore } from "@/store/claude-store";
+import { useConductorStore } from "@/store/conductor-store";
 import { initAudioEngine, getAudioEngine } from "@/audio/audio-engine";
 import { getMidiInput } from "@/audio/midi-input";
 import { getSlotRecorder } from "@/audio/slot-recorder";
+import { constrainPitch, buildHarmonicContext } from "@/audio/pitch-constrainer";
 import { useAutoSave } from "@/hooks/use-auto-save";
+import {
+  createConductor,
+  getConductor,
+  destroyConductor,
+} from "@/conductor/conductor";
+import { buildPerformanceOutline } from "@/conductor/performance-outline";
 import { TransportBar } from "./TransportBar";
 import { TimelineRuler } from "./TimelineRuler";
 import { TrackRow } from "./TrackRow";
@@ -48,32 +58,21 @@ const TRACK_LABELS = ["Melody", "Chords", "Bass", "Drums", "Pad"] as const;
 function getAgentPromptText(
   agentState: string,
   currentSlot: Slot | null,
-  currentChord: string | null,
-  outline: { sections: { id: string; label: string }[] }
+  currentChord: string | null
 ): string {
   switch (agentState) {
     case "idle":
       return "Press Play to begin the co-performance.";
-    case "playing_intro":
-      return "Listening to the intro...";
-    case "prompting": {
-      if (!currentSlot) return "Waiting for next slot...";
-      const sectionLabel =
-        currentSlot.section_ids.length > 0
-          ? outline.sections.find((s) => s.id === currentSlot.section_ids[0])
-              ?.label ?? ""
-          : "";
-      const chordHint = currentChord ? ` (${currentChord})` : "";
-      return `Play a ${currentSlot.track_name} line over ${sectionLabel}${chordHint}`;
+    case "generating_draft":
+      return "Claude is generating a draft arrangement...";
+    case "draft_ready":
+      return "Draft ready! Press Play to begin.";
+    case "performing": {
+      const chordHint = currentChord ? ` — ${currentChord}` : "";
+      return `Performing${chordHint}. Play MIDI to record into any track.`;
     }
-    case "recording":
+    case "human_recording":
       return `Recording ${currentSlot?.track_name ?? ""}...`;
-    case "reviewing":
-      return "Nice! Moving to the next part...";
-    case "agent_filling":
-      return `Agent is filling ${currentSlot?.track_name ?? ""}...`;
-    case "completing":
-      return "Wrapping up...";
     case "finished":
       return "Performance complete!";
     default:
@@ -89,11 +88,22 @@ export function DAWView() {
   const recordings = useSessionStore((s) => s.recordings);
   const isPlaying = useTransportStore((s) => s.isPlaying);
   const position = useTransportStore((s) => s.position);
+  const stemsReady = useTransportStore((s) => s.stemsReady);
   const agentState = useAgentStore((s) => s.state);
   const currentSlotId = useAgentStore((s) => s.current_slot_id);
   const currentChord = useAgentStore((s) => s.current_chord);
 
+  // Conductor state
+  const conductorPhase = useConductorStore((s) => s.phase);
+  const isPlanning = useConductorStore((s) => s.isPlanning);
+  const suggestion = useConductorStore((s) => s.suggestion);
+  const suggestionUrgency = useConductorStore((s) => s.suggestionUrgency);
+  const conductorError = useConductorStore((s) => s.error);
+  const claudeToken = useClaudeStore((s) => s.token);
+  const claudeValid = useClaudeStore((s) => s.isValid);
+
   const initDoneRef = useRef(false);
+  const performanceOutlineRef = useRef<ReturnType<typeof buildPerformanceOutline> | null>(null);
 
   // Auto-save on recording changes
   useAutoSave();
@@ -103,15 +113,22 @@ export function DAWView() {
     if (!outline) navigate("/");
   }, [outline, navigate]);
 
-  // Initialize audio engine and load stems
+  // Initialize audio engine, load stems, build performance outline, create Conductor
   useEffect(() => {
     if (!outline || initDoneRef.current) return;
     initDoneRef.current = true;
 
     const setup = async () => {
       const engine = await initAudioEngine();
-      engine.setOutline(outline);
 
+      // Build performance outline (doubled sections)
+      const perfOutline = buildPerformanceOutline(outline);
+      performanceOutlineRef.current = perfOutline;
+
+      // Set the performance outline on the engine (overrides duration, beats)
+      engine.setPerformanceOutline(perfOutline);
+
+      // Load stems
       const stemUrls: Record<string, string> = {};
       const stemNames = ["vocals", "drums", "bass", "other"] as const;
       for (const name of stemNames) {
@@ -129,25 +146,56 @@ export function DAWView() {
         }
       }
       useTransportStore.getState().setStemsReady(true);
+
+      // Create the Conductor (AI brain)
+      const conductor = createConductor(perfOutline);
+
+      // Register section change callback on the engine
+      engine.setOnSectionChange((fromIndex, toIndex) => {
+        conductor.onSectionTransition(fromIndex, toIndex);
+      });
     };
 
     setup();
+
+    // Cleanup on unmount
+    return () => {
+      destroyConductor();
+      getAudioEngine().setOnSectionChange(null);
+    };
   }, [outline]);
 
-  // Wire MIDI input to live synth + slot recorder
+  // Wire MIDI input to live synth + slot recorder (with pitch constraining)
   useEffect(() => {
     const midi = getMidiInput();
     const recorder = getSlotRecorder();
 
-    const unsub = midi.onNote((note, velocity, isNoteOn) => {
+    // Track raw → constrained mapping so noteOff targets the right oscillator
+    // even if the chord changed between noteOn and noteOff.
+    const activeConstraintMap = new Map<number, number>();
+
+    const unsub = midi.onNote((rawNote, velocity, isNoteOn) => {
       const engine = getAudioEngine();
       const synth = engine.getLiveSynth();
       const agent = useAgentStore.getState();
 
       if (isNoteOn) {
+        // Determine if this track should be pitch-constrained
+        const currentSlot = outline?.slots.find(
+          (s) => s.id === agent.current_slot_id,
+        );
+        const isDrums = currentSlot?.track_name === "drums";
+
+        let note = rawNote;
+        if (!isDrums && outline?.key) {
+          const ctx = buildHarmonicContext(outline.key, agent.current_chord);
+          note = constrainPitch(rawNote, ctx);
+        }
+
+        activeConstraintMap.set(rawNote, note);
         synth?.noteOn(note, velocity);
 
-        if (agent.state === "prompting" && agent.current_slot_id) {
+        if (agent.state === "performing" && agent.current_slot_id) {
           const slot = outline?.slots.find(
             (s) => s.id === agent.current_slot_id
           );
@@ -161,6 +209,9 @@ export function DAWView() {
           recorder.handleNoteOn(note, velocity);
         }
       } else {
+        const note = activeConstraintMap.get(rawNote) ?? rawNote;
+        activeConstraintMap.delete(rawNote);
+
         synth?.noteOff(note);
         if (recorder.isActive()) {
           recorder.handleNoteOff(note);
@@ -171,7 +222,7 @@ export function DAWView() {
     return () => unsub();
   }, [outline]);
 
-  // Handle stop recording
+  // Handle stop recording — also notify Conductor
   const handleStopRecording = useCallback(() => {
     const recorder = getSlotRecorder();
     if (!recorder.isActive() || !outline) return;
@@ -181,16 +232,40 @@ export function DAWView() {
       useSessionStore
         .getState()
         .updateSlotStatus(recording.slot_id, "user-filled");
-      useAgentStore.getState().onRecordingCompleted(outline);
+      useAgentStore.getState().onRecordingCompleted();
+
+      // Notify Conductor so Claude adapts to what the human played
+      const conductor = getConductor();
+      conductor?.onHumanRecording(recording);
     }
   }, [outline]);
+
+  // Generate draft arrangement
+  const handleGenerateDraft = useCallback(async () => {
+    if (!claudeToken || claudeValid !== true) return;
+
+    useAgentStore.getState().transition("generating_draft");
+
+    const conductor = getConductor();
+    if (!conductor) return;
+
+    await conductor.generateDraftArrangement();
+
+    // Check if draft was successful
+    const phase = useConductorStore.getState().phase;
+    if (phase === "ready") {
+      useAgentStore.getState().transition("draft_ready");
+    } else {
+      useAgentStore.getState().transition("idle");
+    }
+  }, [claudeToken, claudeValid]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         e.preventDefault();
-        if (agentState === "recording") {
+        if (agentState === "human_recording") {
           handleStopRecording();
         } else if (isPlaying) {
           // Stop
@@ -206,11 +281,18 @@ export function DAWView() {
           }
           useTransportStore.getState().stop();
           useAgentStore.getState().reset();
-        } else if (outline) {
+        } else if (outline && stemsReady) {
           // Play
           initAudioEngine().then(() => {
-            useAgentStore.getState().startPerformance(outline);
+            useAgentStore.getState().startPerformance();
+            useConductorStore.getState().setPhase("performing");
             useTransportStore.getState().play();
+
+            // Start planning the first section
+            const conductor = getConductor();
+            if (conductor && performanceOutlineRef.current) {
+              conductor.planSection(0);
+            }
           });
         }
       }
@@ -218,7 +300,7 @@ export function DAWView() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPlaying, agentState, outline, handleStopRecording]);
+  }, [isPlaying, agentState, outline, stemsReady, handleStopRecording]);
 
   if (!outline) return null;
 
@@ -232,6 +314,14 @@ export function DAWView() {
 
   // Build recording lookup map
   const recordingMap = new Map(recordings.map((r) => [r.slot_id, r]));
+
+  // Determine if "Generate Draft" button should show
+  const canGenerateDraft =
+    claudeToken &&
+    claudeValid === true &&
+    agentState === "idle" &&
+    stemsReady &&
+    conductorPhase === "idle";
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -310,24 +400,69 @@ export function DAWView() {
       </main>
 
       {/* Agent prompt area */}
-      <footer className="flex h-16 items-center justify-center border-t bg-card px-4">
-        <p
-          className={cn(
-            "text-sm",
-            agentState === "recording"
-              ? "font-medium text-red-400"
-              : agentState === "finished"
-                ? "font-medium text-green-400"
-                : "text-muted-foreground"
+      <footer className="flex h-16 items-center justify-between border-t bg-card px-4">
+        {/* Left: status text */}
+        <div className="flex flex-1 items-center justify-center gap-2">
+          <p
+            className={cn(
+              "text-sm",
+              agentState === "human_recording"
+                ? "font-medium text-red-400"
+                : agentState === "finished"
+                  ? "font-medium text-green-400"
+                  : agentState === "generating_draft"
+                    ? "text-primary animate-pulse"
+                    : "text-muted-foreground"
+            )}
+          >
+            {agentState === "idle" && !stemsReady
+              ? "Loading stems..."
+              : getAgentPromptText(agentState, currentSlot, currentChord)}
+            {agentState === "human_recording" && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                (press Space to finish)
+              </span>
+            )}
+          </p>
+
+          {/* Generate Draft button */}
+          {canGenerateDraft && (
+            <button
+              onClick={handleGenerateDraft}
+              className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Generate Draft
+            </button>
           )}
-        >
-          {getAgentPromptText(agentState, currentSlot, currentChord, outline)}
-          {agentState === "recording" && (
-            <span className="ml-2 text-xs text-muted-foreground">
-              (press Space to finish)
+
+          {/* Planning indicator */}
+          {isPlanning && (
+            <span className="text-[10px] text-primary animate-pulse">
+              Claude is planning...
             </span>
           )}
-        </p>
+        </div>
+
+        {/* Right: Claude suggestion */}
+        {suggestion && (
+          <div
+            className={cn(
+              "max-w-sm rounded px-3 py-1 text-xs",
+              suggestionUrgency === "important"
+                ? "bg-primary/20 text-primary font-medium"
+                : suggestionUrgency === "suggestion"
+                  ? "bg-secondary text-foreground"
+                  : "text-muted-foreground"
+            )}
+          >
+            {suggestion}
+          </div>
+        )}
+
+        {/* Conductor error */}
+        {conductorError && (
+          <span className="text-xs text-red-400">{conductorError}</span>
+        )}
       </footer>
     </div>
   );

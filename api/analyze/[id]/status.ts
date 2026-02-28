@@ -6,7 +6,6 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import Replicate from "replicate";
 
 const STATUS_MAP: Record<string, string> = {
   starting: "queued",
@@ -39,13 +38,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: "Missing prediction id" });
   }
 
-  const replicate = new Replicate({ auth: token });
-  const prediction = await replicate.predictions.get(id);
+  try {
+    const response = await fetch(
+      `https://api.replicate.com/v1/predictions/${id}`,
+      { headers: { Authorization: `Token ${token}` } }
+    );
 
-  return res.status(200).json({
-    job_id: prediction.id,
-    status: STATUS_MAP[prediction.status] ?? "queued",
-    progress: PROGRESS_MAP[prediction.status] ?? 0.0,
-    error: prediction.error ? String(prediction.error) : null,
-  });
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: `Replicate API error: ${text}` });
+    }
+
+    const prediction = await response.json();
+
+    return res.status(200).json({
+      job_id: prediction.id,
+      status: STATUS_MAP[prediction.status] ?? "queued",
+      progress: PROGRESS_MAP[prediction.status] ?? 0.0,
+      error: prediction.error ? String(prediction.error) : null,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: err instanceof Error ? err.message : "Unknown error fetching status",
+    });
+  }
 }

@@ -4,13 +4,10 @@
 
 export type AgentState =
   | "idle"
-  | "playing_intro"
-  | "prompting"
-  | "recording"
-  | "reviewing"
-  | "agent_filling"
-  | "transitioning"
-  | "completing"
+  | "generating_draft"
+  | "draft_ready"
+  | "performing"
+  | "human_recording"
   | "finished";
 
 export interface AgentContext {

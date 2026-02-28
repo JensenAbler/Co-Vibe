@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { useLocation } from "wouter";
-import { FolderOpen, Music } from "lucide-react";
+import { CloudUpload, FolderOpen, Music } from "lucide-react";
 import { cn } from "@/components/ui/utils";
-import { uploadForAnalysis, pollUntilComplete } from "@/api/analysis-client";
+import { uploadForAnalysis, analyzeFromUrl, pollUntilComplete } from "@/api/analysis-client";
 import { useSessionStore } from "@/store/session-store";
 import { listSessions, type DBSessionMeta } from "@/lib/db";
 import { SessionBrowser } from "@/components/sessions/SessionBrowser";
@@ -23,10 +23,16 @@ export function UploadView() {
   const [error, setError] = useState<string | null>(null);
   const [sessionBrowserOpen, setSessionBrowserOpen] = useState(false);
   const [recentSessions, setRecentSessions] = useState<DBSessionMeta[]>([]);
+  const [blobs, setBlobs] = useState<{ url: string; pathname: string; size: number; uploadedAt: string }[]>([]);
+  const [blobsExpanded, setBlobsExpanded] = useState(false);
 
-  // Load recent sessions on mount
+  // Load recent sessions + blob list on mount
   useEffect(() => {
     listSessions().then((list) => setRecentSessions(list.slice(0, 3)));
+    fetch("/api/blobs")
+      .then((r) => r.json())
+      .then((d) => setBlobs(d.blobs ?? []))
+      .catch(() => {});
   }, []);
 
   const handleFile = useCallback(
@@ -78,6 +84,25 @@ export function UploadView() {
     setIsAnalyzing(false);
     setAnalysisStatus(null);
   };
+
+  const handleAnalyzeBlob = useCallback(async (url: string) => {
+    setIsAnalyzing(true);
+    setError(null);
+    setAnalysisStatus(null);
+
+    try {
+      const { job_id } = await analyzeFromUrl(url);
+      const result = await pollUntilComplete(job_id, (status) => {
+        setAnalysisStatus(status);
+      });
+      useSessionStore.getState().createSession(result.outline);
+      await useSessionStore.getState().save();
+      navigate("/perform");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Analysis failed");
+      setIsAnalyzing(false);
+    }
+  }, [navigate]);
 
   const handleOpenSession = async (id: string) => {
     await useSessionStore.getState().loadFromDB(id);
@@ -166,6 +191,44 @@ export function UploadView() {
               onChange={handleFileInput}
             />
           </label>
+
+          {/* Uploaded blobs */}
+          {blobs.length > 0 && (
+            <div className="flex w-full max-w-lg flex-col gap-1.5">
+              <button
+                onClick={() => setBlobsExpanded((v) => !v)}
+                className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <CloudUpload className="h-3.5 w-3.5" />
+                Uploaded files ({blobs.length})
+                <span className="text-[10px]">{blobsExpanded ? "\u25B2" : "\u25BC"}</span>
+              </button>
+              {blobsExpanded && (
+                <div className="space-y-1">
+                  {blobs.map((b) => (
+                    <button
+                      key={b.url}
+                      onClick={() => handleAnalyzeBlob(b.url)}
+                      className="flex w-full items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-left transition-colors hover:bg-secondary/50"
+                    >
+                      <Music className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-medium">
+                          {b.pathname}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground">
+                          {(b.size / (1024 * 1024)).toFixed(1)} MB
+                        </p>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {new Date(b.uploadedAt).toLocaleDateString()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Recent sessions + browse all */}
           <div className="flex w-full max-w-lg flex-col gap-3">

@@ -4,7 +4,8 @@
   "private": true,
   "license": "AGPL-3.0",
   "dependencies": {
-    "replicate": "^1.0.1"
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@vercel/blob": "^2.3.0"
   },
   "devDependencies": {
     "@vercel/node": "^4.0.0",

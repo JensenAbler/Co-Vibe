@@ -8,11 +8,16 @@
 
 import { fetchAndDecode, findBeatIndex } from "./utils";
 import { SimpleSynth } from "./simple-synth";
+import { Vocoder } from "./vocoder";
+import { CarrierSynth } from "./carrier-synth";
+import { getVoiceInput } from "./voice-input";
 import { useTransportStore } from "@/store/transport-store";
 import { useAgentStore } from "@/store/agent-store";
 import { useSessionStore } from "@/store/session-store";
 import type { SongOutline } from "@/types/song-outline";
 import type { SlotRecording } from "@/types/session";
+import type { PerformanceOutline, PerformanceSection } from "@/conductor/performance-outline";
+import { findPerformanceSectionIndex } from "@/conductor/performance-outline";
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -41,6 +46,14 @@ export class AudioEngine {
 
   // Outline reference
   private outline: SongOutline | null = null;
+  private performanceOutline: PerformanceOutline | null = null;
+
+  // Section change callback (for Conductor integration)
+  private onSectionChange: ((fromIndex: number, toIndex: number) => void) | null = null;
+  private lastSectionIndex = -1;
+
+  // Original stem duration (for looping)
+  private originalStemDuration = 0;
 
   // Mute/Solo/Volume state (mirrored from transport-store for audio-thread access)
   private mutedTracks = new Set<string>();
@@ -52,6 +65,11 @@ export class AudioEngine {
 
   // Loading state
   private stemsLoaded = false;
+
+  // Vocoder
+  private vocoder: Vocoder | null = null;
+  private carrierSynth: CarrierSynth | null = null;
+  private vocoderEnabled = false;
 
   /**
    * Create or resume the AudioContext. Must be called from a user gesture.
@@ -91,12 +109,15 @@ export class AudioEngine {
       }
     }
 
-    // Determine duration from the longest stem
+    // Update duration from the longest stem, but never overwrite
+    // a valid duration (from setOutline) with zero.
     let maxDuration = 0;
     for (const buffer of this.stemBuffers.values()) {
       maxDuration = Math.max(maxDuration, buffer.duration);
     }
-    this.duration = maxDuration;
+    if (maxDuration > 0) {
+      this.duration = Math.max(this.duration, maxDuration);
+    }
     this.stemsLoaded = true;
   }
 
@@ -107,8 +128,29 @@ export class AudioEngine {
     this.outline = outline;
     this.beats = outline.beats;
     if (outline.source_track?.duration) {
+      this.originalStemDuration = outline.source_track.duration;
       this.duration = Math.max(this.duration, outline.source_track.duration);
     }
+  }
+
+  /**
+   * Set a PerformanceOutline (doubled sections) for the Conductor.
+   * Overrides duration, beats, and downbeats with the performance timeline.
+   */
+  setPerformanceOutline(perfOutline: PerformanceOutline): void {
+    this.performanceOutline = perfOutline;
+    this.outline = perfOutline.original;
+    this.beats = perfOutline.beats;
+    this.duration = perfOutline.totalDuration;
+    this.originalStemDuration = perfOutline.original.source_track.duration;
+  }
+
+  /**
+   * Register a callback for section boundary changes.
+   * The Conductor uses this to execute plans and trigger planning.
+   */
+  setOnSectionChange(cb: ((fromIndex: number, toIndex: number) => void) | null): void {
+    this.onSectionChange = cb;
   }
 
   /**
@@ -124,6 +166,14 @@ export class AudioEngine {
       const source = this.ctx.createBufferSource();
       source.buffer = buffer;
 
+      // Enable looping when using a performance outline (doubled duration)
+      // Stems loop from 0 → original duration so they repeat for the 2x timeline
+      if (this.performanceOutline && this.originalStemDuration > 0) {
+        source.loop = true;
+        source.loopStart = 0;
+        source.loopEnd = this.originalStemDuration;
+      }
+
       // Get or create gain node for this stem
       let gain = this.stemGains.get(name);
       if (!gain) {
@@ -137,14 +187,20 @@ export class AudioEngine {
 
       // Start all at the same precise time, with offset
       const startTime = this.ctx.currentTime + 0.05;
-      source.start(startTime, this.offset);
-      source.onended = () => {
-        this.stemSources.delete(name);
-        // If all stems ended naturally, stop transport
-        if (this.stemSources.size === 0 && this.playing) {
-          this.stop();
-        }
-      };
+      const stemOffset = this.performanceOutline
+        ? this.offset % this.originalStemDuration  // wrap offset for looped stems
+        : this.offset;
+      source.start(startTime, stemOffset);
+
+      if (!this.performanceOutline) {
+        // Only auto-stop on stem end for non-looped mode
+        source.onended = () => {
+          this.stemSources.delete(name);
+          if (this.stemSources.size === 0 && this.playing) {
+            this.stop();
+          }
+        };
+      }
 
       this.stemSources.set(name, source);
     }
@@ -156,6 +212,9 @@ export class AudioEngine {
 
     // Start the transport clock
     this.lastBeatIndex = findBeatIndex(this.beats, this.offset);
+    this.lastSectionIndex = this.performanceOutline
+      ? findPerformanceSectionIndex(this.performanceOutline, this.offset)
+      : -1;
     this.startClock();
   }
 
@@ -329,31 +388,61 @@ export class AudioEngine {
   // --- Slot playback ---
 
   private scheduleSlotPlayback(): void {
-    if (!this.ctx || !this.masterGain || !this.outline) return;
+    if (!this.ctx || !this.masterGain) return;
 
     const recordings = useSessionStore.getState().recordings;
     if (recordings.length === 0) return;
 
-    for (const recording of recordings) {
-      // Find the earliest section this slot covers to get the time offset
-      const slot = this.outline.slots.find(
-        (s) => s.id === recording.slot_id
-      );
-      if (!slot || slot.section_ids.length === 0) continue;
+    if (this.performanceOutline) {
+      // Performance mode: MIDI event times are absolute in the performance timeline
+      // Group by slot_id, prefer user recordings over agent recordings
+      const slotMap = new Map<string, SlotRecording>();
+      for (const recording of recordings) {
+        const existing = slotMap.get(recording.slot_id);
+        if (!existing || recording.source === "user") {
+          slotMap.set(recording.slot_id, recording);
+        }
+      }
 
-      const section = this.outline.sections.find(
-        (s) => s.id === slot.section_ids[0]
-      );
-      if (!section) continue;
+      for (const recording of slotMap.values()) {
+        if (recording.midi_events.length === 0) continue;
 
-      // The recording's event times are relative to recording start.
-      // Schedule them at the section's start time in the song.
-      const sectionOffset = section.start_time - this.offset;
-      if (sectionOffset < 0) continue; // Section already passed
+        // Events have absolute times — schedule relative to play start
+        const synth = new SimpleSynth(this.ctx, this.masterGain!);
+        for (const event of recording.midi_events) {
+          const eventTime = event.time - this.offset;
+          if (eventTime < 0) continue; // Event already passed
 
-      const synth = new SimpleSynth(this.ctx, this.masterGain);
-      synth.scheduleRecording(recording, this.playStartedAt + sectionOffset);
-      this.slotSynths.push(synth);
+          const scheduleAt = this.playStartedAt + eventTime;
+          synth.scheduleNote(
+            event.note,
+            event.velocity,
+            scheduleAt,
+            event.duration
+          );
+        }
+        this.slotSynths.push(synth);
+      }
+    } else if (this.outline) {
+      // Legacy mode: events relative to recording start, scheduled at section start
+      for (const recording of recordings) {
+        const slot = this.outline.slots.find(
+          (s) => s.id === recording.slot_id
+        );
+        if (!slot || slot.section_ids.length === 0) continue;
+
+        const section = this.outline.sections.find(
+          (s) => s.id === slot.section_ids[0]
+        );
+        if (!section) continue;
+
+        const sectionOffset = section.start_time - this.offset;
+        if (sectionOffset < 0) continue;
+
+        const synth = new SimpleSynth(this.ctx, this.masterGain!);
+        synth.scheduleRecording(recording, this.playStartedAt + sectionOffset);
+        this.slotSynths.push(synth);
+      }
     }
   }
 
@@ -365,8 +454,8 @@ export class AudioEngine {
 
       const position = this.getCurrentTime();
 
-      // Check if we've reached the end
-      if (position >= this.duration) {
+      // Check if we've reached the end (guard: duration must be > 0)
+      if (this.duration > 0 && position >= this.duration) {
         this.stop();
         useTransportStore.getState().stop();
         useAgentStore.getState().transition("finished");
@@ -388,6 +477,21 @@ export class AudioEngine {
         this.lastBeatIndex = beatIndex;
       }
 
+      // Detect section changes for Conductor integration
+      if (this.performanceOutline && this.onSectionChange) {
+        const currentSectionIndex = findPerformanceSectionIndex(
+          this.performanceOutline,
+          position
+        );
+        if (currentSectionIndex !== this.lastSectionIndex) {
+          const prevIndex = this.lastSectionIndex;
+          this.lastSectionIndex = currentSectionIndex;
+          if (prevIndex >= 0) {
+            this.onSectionChange(prevIndex, currentSectionIndex);
+          }
+        }
+      }
+
       this.rafId = requestAnimationFrame(tick);
     };
 
@@ -401,10 +505,64 @@ export class AudioEngine {
     }
   }
 
+  // --- Vocoder ---
+
+  async enableVocoder(): Promise<boolean> {
+    if (!this.ctx || !this.masterGain || this.vocoderEnabled) return false;
+
+    const voice = getVoiceInput();
+    const micOk = await voice.init(this.ctx);
+    if (!micOk) return false;
+
+    this.vocoder = new Vocoder(this.ctx);
+
+    const sourceNode = voice.getSourceNode();
+    if (sourceNode) {
+      this.vocoder.connectModulator(sourceNode);
+    }
+
+    this.vocoder.getOutput().connect(this.masterGain);
+
+    this.carrierSynth = new CarrierSynth(this.vocoder);
+    this.carrierSynth.start();
+
+    this.vocoderEnabled = true;
+    return true;
+  }
+
+  disableVocoder(): void {
+    if (!this.vocoderEnabled) return;
+
+    this.carrierSynth?.dispose();
+    this.carrierSynth = null;
+
+    const voice = getVoiceInput();
+    const sourceNode = voice.getSourceNode();
+    if (sourceNode && this.vocoder) {
+      this.vocoder.disconnectModulator(sourceNode);
+    }
+
+    this.vocoder?.dispose();
+    this.vocoder = null;
+
+    voice.dispose();
+
+    this.vocoderEnabled = false;
+  }
+
+  setVocoderGain(value: number): void {
+    this.vocoder?.setGain(Math.max(0, Math.min(1, value)));
+  }
+
+  isVocoderEnabled(): boolean {
+    return this.vocoderEnabled;
+  }
+
   // --- Cleanup ---
 
   dispose(): void {
     this.stop();
+    this.disableVocoder();
     this.liveSynth?.dispose();
     this.stemBuffers.clear();
     this.stemGains.clear();

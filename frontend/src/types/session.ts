@@ -16,7 +16,7 @@ export interface MidiEvent {
 export interface SlotRecording {
   slot_id: string;
   track_name: SlotTrack;
-  source: "user" | "agent";
+  source: "user" | "agent" | "agent-draft";
   midi_events: MidiEvent[];
   /** Timestamp when this slot was filled */
   filled_at: number;

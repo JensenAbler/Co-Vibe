@@ -64,10 +64,10 @@ export function TrackRow({
       className={cn(
         "flex h-16 items-center border-b border-border/50",
         isActiveSlot &&
-          agentState === "prompting" &&
+          agentState === "performing" &&
           "ring-1 ring-inset ring-primary/50",
         isActiveSlot &&
-          agentState === "recording" &&
+          agentState === "human_recording" &&
           "ring-2 ring-inset ring-red-500/70 animate-pulse"
       )}
     >

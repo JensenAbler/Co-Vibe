@@ -33,6 +33,8 @@ interface SessionState {
   setOutline: (outline: SongOutline) => void;
   updateSlotStatus: (slotId: string, status: SlotStatus) => void;
   addRecording: (recording: SlotRecording) => void;
+  /** Remove all recordings for a given slot ID. */
+  removeRecording: (slotId: string) => void;
   reset: () => void;
 
   /** Create a brand-new session from an outline. */
@@ -72,6 +74,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   addRecording: (recording) =>
     set((state) => ({
       recordings: [...state.recordings, recording],
+      isDirty: true,
+    })),
+
+  removeRecording: (slotId) =>
+    set((state) => ({
+      recordings: state.recordings.filter((r) => r.slot_id !== slotId),
       isDirty: true,
     })),
 

@@ -15,13 +15,18 @@ import demucs.api
 logger = logging.getLogger(__name__)
 
 
-def separate_stems(audio_path: Path, output_dir: Path) -> dict[str, str]:
+def separate_stems(
+    audio_path: Path,
+    output_dir: Path,
+    separator: demucs.api.Separator | None = None,
+) -> dict[str, str]:
     """
     Run Demucs v4 Hybrid Transformer on the input audio file.
 
     Args:
         audio_path: Path to the source audio file.
         output_dir: Directory to write separated stem WAV files.
+        separator: Pre-loaded Demucs Separator (avoids reload on each call).
 
     Returns:
         Dict mapping stem names to file paths:
@@ -29,8 +34,9 @@ def separate_stems(audio_path: Path, output_dir: Path) -> dict[str, str]:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading Demucs htdemucs model")
-    separator = demucs.api.Separator(model="htdemucs")
+    if separator is None:
+        logger.info("Loading Demucs htdemucs model")
+        separator = demucs.api.Separator(model="htdemucs")
 
     logger.info("Separating stems from %s", audio_path)
     _, separated = separator.separate_audio_file(str(audio_path))

@@ -43,9 +43,13 @@ def _ensure_wav(file_path: Path) -> Path:
     return wav_path
 
 
-async def run_pipeline(job: dict) -> None:
+async def run_pipeline(job: dict, separator=None) -> None:
     """
     Execute the full analysis pipeline for a job.
+
+    Args:
+        job: Mutable dict with job state (id, file_path, upload_dir, status, progress).
+        separator: Pre-loaded Demucs Separator instance (optional).
 
     Updates job status/progress in-place as each step completes.
     """
@@ -61,7 +65,7 @@ async def run_pipeline(job: dict) -> None:
         job["status"] = "separating"
         job["progress"] = 0.1
         logger.info("[%s] Starting source separation", job["id"])
-        stem_paths = await asyncio.to_thread(separate_stems, file_path, upload_dir)
+        stem_paths = await asyncio.to_thread(separate_stems, file_path, upload_dir, separator)
         job["stem_paths"] = stem_paths
         job["progress"] = 0.4
         logger.info("[%s] Separation complete", job["id"])

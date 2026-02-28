@@ -110,6 +110,38 @@ export class SimpleSynth {
   }
 
   /**
+   * Schedule a single note for playback at an absolute AudioContext time.
+   * Used by the Conductor for per-event scheduling.
+   */
+  scheduleNote(
+    note: number,
+    velocity: number,
+    startTime: number,
+    duration: number
+  ): void {
+    const noteEnd = startTime + duration;
+    const targetGain = (velocity / 127) * MAX_GAIN;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.value = midiNoteToFrequency(note);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(targetGain, startTime + ATTACK_TIME);
+    gain.gain.setValueAtTime(targetGain, noteEnd);
+    gain.gain.linearRampToValueAtTime(0, noteEnd + RELEASE_TIME);
+
+    osc.connect(gain);
+    gain.connect(this.output);
+
+    osc.start(startTime);
+    osc.stop(noteEnd + RELEASE_TIME + 0.01);
+
+    this.scheduledNodes.push({ osc, gain });
+  }
+
+  /**
    * Stop all active and scheduled notes.
    */
   stopAll(): void {

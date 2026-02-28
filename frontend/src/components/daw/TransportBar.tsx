@@ -12,6 +12,8 @@ import {
   Download,
   FolderOpen,
   Check,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/components/ui/utils";
@@ -20,10 +22,14 @@ import { useAgentStore } from "@/store/agent-store";
 import { useSessionStore } from "@/store/session-store";
 import { initAudioEngine } from "@/audio/audio-engine";
 import { getSlotRecorder } from "@/audio/slot-recorder";
+import { getConductor } from "@/conductor/conductor";
+import { useConductorStore } from "@/store/conductor-store";
 import { useMidiDevices } from "@/hooks/use-midi-devices";
+import { useVoiceInput } from "@/hooks/use-voice-input";
 import { loadSession } from "@/lib/db";
 import { exportCovibe, downloadBlob } from "@/lib/covibe-file";
 import { SessionBrowser } from "@/components/sessions/SessionBrowser";
+import { ClaudeTokenBar } from "@/components/daw/ClaudeTokenBar";
 import type { SongOutline, Slot } from "@/types/song-outline";
 
 // --- Formatting helpers ---
@@ -78,6 +84,7 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
   const isPlaying = useTransportStore((s) => s.isPlaying);
   const position = useTransportStore((s) => s.position);
   const currentBeat = useTransportStore((s) => s.currentBeat);
+  const stemsReady = useTransportStore((s) => s.stemsReady);
   const agentState = useAgentStore((s) => s.state);
   const currentChord = useAgentStore((s) => s.current_chord);
 
@@ -95,14 +102,26 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
     isSupported: midiSupported,
   } = useMidiDevices();
 
+  const {
+    isSupported: voiceSupported,
+    isEnabled: vocoderEnabled,
+    enable: enableVocoder,
+    disable: disableVocoder,
+  } = useVoiceInput();
+
   const { key, tempo, time_signature } = outline;
 
   const handlePlay = useCallback(async () => {
-    if (!outline || isPlaying) return;
+    if (!outline || isPlaying || !stemsReady) return;
     await initAudioEngine();
-    useAgentStore.getState().startPerformance(outline);
+    useAgentStore.getState().startPerformance();
+    useConductorStore.getState().setPhase("performing");
     useTransportStore.getState().play();
-  }, [outline, isPlaying]);
+
+    // Start planning the first section
+    const conductor = getConductor();
+    conductor?.planSection(0);
+  }, [outline, isPlaying, stemsReady]);
 
   const handleStop = useCallback(() => {
     const recorder = getSlotRecorder();
@@ -124,7 +143,7 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
     if (recording) {
       useSessionStore.getState().addRecording(recording);
       useSessionStore.getState().updateSlotStatus(recording.slot_id, "user-filled");
-      useAgentStore.getState().onRecordingCompleted(outline);
+      useAgentStore.getState().onRecordingCompleted();
     }
   }, [outline]);
 
@@ -162,7 +181,7 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
               <Square className="h-3.5 w-3.5" />
             </button>
 
-            {agentState === "recording" ? (
+            {agentState === "human_recording" ? (
               <button
                 onClick={handleStopRecording}
                 title="Finish recording"
@@ -174,11 +193,11 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
             ) : (
               <button
                 onClick={handlePlay}
-                disabled={isPlaying}
-                title="Play"
+                disabled={isPlaying || !stemsReady}
+                title={stemsReady ? "Play" : "Loading stems..."}
                 className={cn(
                   "flex h-7 w-7 items-center justify-center rounded",
-                  isPlaying
+                  isPlaying || !stemsReady
                     ? "text-primary/50"
                     : "text-primary hover:bg-secondary/80"
                 )}
@@ -286,6 +305,32 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
             <span className="text-[10px] text-muted-foreground">No MIDI</span>
           )}
 
+          {/* Vocoder toggle */}
+          {voiceSupported && (
+            <button
+              onClick={() =>
+                vocoderEnabled ? disableVocoder() : enableVocoder()
+              }
+              title={vocoderEnabled ? "Disable vocoder" : "Enable vocoder"}
+              className={cn(
+                "flex h-7 items-center gap-1 rounded px-2 text-[10px]",
+                vocoderEnabled
+                  ? "bg-primary/20 text-primary"
+                  : "text-muted-foreground hover:bg-secondary/80"
+              )}
+            >
+              {vocoderEnabled ? (
+                <Mic className="h-3 w-3" />
+              ) : (
+                <MicOff className="h-3 w-3" />
+              )}
+              <span>Vocoder</span>
+            </button>
+          )}
+
+          {/* Claude token */}
+          <ClaudeTokenBar />
+
           {/* Time display */}
           {isPlaying && (
             <span className="tabular-nums text-xs text-muted-foreground">
@@ -296,7 +341,7 @@ export function TransportBar({ outline, currentSlot }: TransportBarProps) {
 
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {/* Recording indicator */}
-          {agentState === "recording" && (
+          {agentState === "human_recording" && (
             <span className="flex items-center gap-1 text-red-400">
               <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
               REC
