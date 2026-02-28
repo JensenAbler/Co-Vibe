@@ -21,5 +21,6 @@ COPY server/ ./server/
 # Expose port (Railway sets PORT env var)
 EXPOSE 3001
 
-# Start the server
-CMD ["node", "--import", "tsx", "server/index.ts"]
+# Start the server from the server directory so tsx is resolvable
+WORKDIR /app/server
+CMD ["node", "--import", "tsx", "index.ts"]
